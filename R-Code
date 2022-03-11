@@ -1,0 +1,1129 @@
+########### Libraries ##########
+library(readr)
+library(xts)
+library(plyr)
+library(dplyr)
+library(lubridate)
+library(fitdistrplus)
+library(matrixStats)
+library(tidyverse)
+library(FinTS)
+library(tseries)
+library(vars)
+library(covid19italy)
+library(reshape2)
+library(covid19us)
+library(nnfor)
+library(emssm)
+suppressPackageStartupMessages(library(forecast)) 
+suppressPackageStartupMessages(library(dlm))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(zoo))
+suppressPackageStartupMessages(library(gridExtra))
+
+######## Daily data ##########
+
+####### Rio de Janeiro ##########
+{
+getOption('timeout')
+options(timeout=100)
+getOption('timeout')
+
+link_casos_mortes<-"https://pcrj.maps.arcgis.com/sharing/rest/content/items/b54234c151aa4d01b488dc12aafd5574/data"
+
+Dados_indiv_MRJ_covid19 <- read.delim(link_casos_mortes, header = T, skip = 0, sep = ",",
+                                      na.strings = c("Missing","","#N/D", "NA", "N/D"))
+colnames(Dados_indiv_MRJ_covid19)
+
+Dados_indiv_MRJ_covid19$dt_notific<-as.Date(Dados_indiv_MRJ_covid19$dt_notific, format = "%m/%d/%Y")
+Dados_indiv_MRJ_covid19$dt_inicio_sintomas<-as.Date(Dados_indiv_MRJ_covid19$dt_inicio_sintomas, 
+                                                    format = "%m/%d/%Y")
+Dados_indiv_MRJ_covid19$dt_evolucao<-as.Date(Dados_indiv_MRJ_covid19$dt_evolucao, format = "%m/%d/%Y")
+Dados_indiv_MRJ_covid19$bairro_resid__estadia<-gsub(" ","_",Dados_indiv_MRJ_covid19$bairro_resid__estadia)
+
+Dados_indiv_MRJ_covid19$week_notific<-as.numeric(format(Dados_indiv_MRJ_covid19$dt_notific,format = "%Y%U"))
+
+Dados_indiv_MRJ_covid19$CAP_agregada<-floor(as.numeric(Dados_indiv_MRJ_covid19$ap_residencia_estadia))
+
+CAP<-unique(sort(Dados_indiv_MRJ_covid19$CAP_agregada))
+min_Date<-as.Date("2019-12-31")
+max_Date<-Sys.Date()
+
+Dados_indiv_MRJ_covid19<-subset(Dados_indiv_MRJ_covid19,Dados_indiv_MRJ_covid19$dt_notific >= min_Date &
+                                  Dados_indiv_MRJ_covid19$dt_notific <= max_Date)
+
+Tempo<-seq.Date(min(as.Date(na.omit(Dados_indiv_MRJ_covid19$dt_notific))),
+                max(as.Date(na.omit(Dados_indiv_MRJ_covid19$dt_notific))), by = "day")
+
+time_series<-xts(matrix(0,nrow = length(Tempo),ncol = length(CAP)),order.by = Tempo)
+
+i<-1
+for (i in 1:length(CAP)) {
+  Notificacoes_diarias<-as.Date(na.omit(Dados_indiv_MRJ_covid19$dt_notific))
+  dados_diarios<-subset(Dados_indiv_MRJ_covid19,Dados_indiv_MRJ_covid19$CAP_agregada==CAP[i])
+  Notificacoes_diarias<-as.Date(na.omit(dados_diarios$dt_notific))
+  Notificacoes_por_dia<-plyr::count(Notificacoes_diarias)
+  freq_dia<-rep(0,length(Tempo))
+  Notificacoes_por_dia<-data.frame(Tempo,freq_dia)
+  Notificacoes_por_dia
+  j=1
+  for (j in 1:length(Tempo)) {
+    if(any(Notificacoes_por_dia$Tempo[j]==plyr::count(Notificacoes_diarias)$x)) {
+      Notificacoes_por_dia$freq_dia[j]<-
+      plyr::count(Notificacoes_diarias)$freq[which(Notificacoes_por_dia$Tempo[j]==plyr::count(Notificacoes_diarias)$x)]
+    }
+  }
+  Notificacoes_por_dia
+  time_series[,i]<-xts(Notificacoes_por_dia$freq,order.by = Tempo)
+}
+colnames(time_series)<-CAP
+data_all_daily_RJ<-subset(time_series,index(time_series)>=as.Date("2020-03-12"))
+rm(dados_diarios,Dados_indiv_MRJ_covid19,Notificacoes_diarias,Notificacoes_por_dia,CAP,freq_dia, max_Date, 
+   min_Date,Tempo,time_series,i,j,link_casos_mortes)
+}
+data_all_daily_RJ
+
+####### Italy ###################
+{
+df<-covid19italy::italy_region[,c("date","cumulative_cases","region_name")]
+
+df_reshaped<-reshape2::dcast(df, date ~ region_name,value.var = "cumulative_cases")
+
+data_all_cumulative<-xts::xts(df_reshaped[,-1], order.by = seq.Date(min(df_reshaped$date),
+                                                                    max(df_reshaped$date),by=1))
+data_all_daily<-xts::diff.xts(data_all_cumulative)
+data_all_daily[1,]<-data_all_cumulative[1,]
+
+colnames(data_all_daily)
+
+Population<-c(1285256,547579,1877728,5679759,4445549,1198753,
+              5720796,1509805,9966992,1501406,296547, 500030,1078460,4273210,
+              3926931,1598225,4840876,3668333,865013,4852453,123895)
+
+Region<-c("South","South","South","South","North-East","North-East","Center","North-West",
+          "North-West","Center","South","North-East","North-East","North-West","South","Islands","Islands",
+          "Center","Center","North-West","North-East")
+
+Population_Italy<-data.frame(region=colnames(data_all_daily),Region_aggregate=Region,population=Population)
+Population_Italy
+
+data_all_daily_Region<-data_all_daily
+
+colnames(data_all_daily_Region)<-Region
+
+data_all_daily_Region_row_names<-t(aggregate(t(data_all_daily_Region),
+                                             by = list(rownames(t(data_all_daily_Region))),
+                                             FUN = sum))[1,]
+
+data_all_daily_Region<-as.data.frame(t(aggregate(as.matrix(t(data_all_daily_Region)),
+                                                 by = list(rownames(t(data_all_daily_Region))),
+                                                 FUN = sum))[-1,])
+
+colnames(data_all_daily_Region)<-data_all_daily_Region_row_names
+
+data_all_daily_Italy<-xts::xts(as.matrix(sapply(data_all_daily_Region, as.numeric)), 
+                                order.by = seq.Date(min(df_reshaped$date),max(df_reshaped$date),by=1))
+rm(Population_Italy,df,df_reshaped,data_all_daily_Region_row_names,data_all_cumulative,
+   data_all_daily,Population,Region,data_all_daily_Region)
+}
+data_all_daily_Italy
+
+####### US ######################
+{
+US_DB<-covid19us::get_states_daily(state = "all", date = "all")
+US_DB_Studied<-subset(US_DB,US_DB$state %in% c("CA", "OR", "NV","AZ"))
+US_DB_Studied_reshaped<-reshape2::dcast(US_DB_Studied, date ~ state,value.var = "positive")
+US_DB_Studied_reshaped[
+  which(is.na.data.frame(US_DB_Studied_reshaped),arr.ind = T)[,1],
+  which(is.na.data.frame(US_DB_Studied_reshaped),arr.ind = T)[,2]]<-0
+data_all_cumulative_US<-xts::xts(US_DB_Studied_reshaped[,-1], order.by = 
+                                   seq.Date(min(US_DB_Studied_reshaped$date),max(US_DB_Studied_reshaped$date),by=1))
+data_all_daily_US<-xts::diff.xts(data_all_cumulative_US)
+data_all_daily_US[1,]<-data_all_cumulative_US[1,]
+rm(US_DB,US_DB_Studied,US_DB_Studied_reshaped,data_all_cumulative_US)
+}
+data_all_daily_US
+
+####### Changing negative observations to 0  ###################
+{
+i<-1
+for (i in 1:ncol(data_all_daily_RJ)) {
+  if(length(which(data_all_daily_RJ[,i]<0))){data_all_daily_RJ[which(data_all_daily_RJ[,i]<0),i]<-0}
+}
+
+i<-1
+for (i in 1:ncol(data_all_daily_Italy)) {
+  if(length(which(data_all_daily_Italy[,i]<0))){data_all_daily_Italy[which(data_all_daily_Italy[,i]<0),i]<-0}
+}
+
+i<-1
+for (i in 1:ncol(data_all_daily_US)) {
+  if(length(which(data_all_daily_US[,i]<0))){data_all_daily_US[which(data_all_daily_US[,i]<0),i]<-0}
+}
+rm(i)
+}
+
+
+############### Time series plots ###################
+{
+plot.xts(data_all_daily_RJ,grid.col = NA, main = NULL,col = rainbow(length(colnames(data_all_daily_RJ))))
+xts::addLegend(legend.loc = "topleft", legend.names = paste("R",colnames(data_all_daily_RJ)), lty=1,
+               col = rainbow(length(colnames(data_all_daily_RJ))))
+
+plot.xts(data_all_daily_Italy,grid.col = NA, main = NULL,col = rainbow(length(colnames(data_all_daily_Italy))))
+xts::addLegend(legend.loc = "topleft", legend.names = colnames(data_all_daily_Italy), lty=1,
+               col = rainbow(length(colnames(data_all_daily_Italy))))
+
+plot.xts(data_all_daily_US,grid.col = NA, main = NULL,col = rainbow(length(colnames(data_all_daily_US))))
+xts::addLegend(legend.loc = "topleft", legend.names = c("Arizona","California","Nevada","Oregon"), 
+               lty=1,col = rainbow(length(colnames(data_all_daily_US))))
+}
+
+############### Time series length and forecasting range ###################
+Length_Time_Series<-min(nrow(data_all_daily_RJ),nrow(data_all_daily_Italy), nrow(data_all_daily_US))
+prediction_range<-28
+Training_Length<-1:(Length_Time_Series-prediction_range)
+Test_Length<-(Length_Time_Series-prediction_range+1):Length_Time_Series
+
+############### Time series plots considering Time Series Length ###################
+{plot.xts(data_all_daily_RJ[1:Length_Time_Series],grid.col = NA, main = NULL,
+           col = rainbow(length(colnames(data_all_daily_RJ))))
+xts::addLegend(legend.loc = "topleft", legend.names = paste("R",colnames(data_all_daily_RJ)), lty=1,
+                 col = rainbow(length(colnames(data_all_daily_RJ))))}
+{plot.xts(data_all_daily_Italy[1:Length_Time_Series],grid.col = NA, main = NULL,
+           col = rainbow(length(colnames(data_all_daily_Italy))))
+xts::addLegend(legend.loc = "topleft", legend.names = colnames(data_all_daily_Italy), lty=1,
+                 col = rainbow(length(colnames(data_all_daily_Italy))))}
+{plot.xts(data_all_daily_US[1:Length_Time_Series],grid.col = NA, main = NULL,
+           col = rainbow(length(colnames(data_all_daily_US))))
+xts::addLegend(legend.loc = "topleft", legend.names = c("Arizona","California","Nevada","Oregon"), 
+                 lty=1,col = rainbow(length(colnames(data_all_daily_US))))}
+
+############# Correlation Plots #################
+
+par(mfrow = c(2, 5))
+
+i<-1; j<-1
+for (i in 1:ncol(data_all_daily_RJ)) {
+  for (j in i:ncol(data_all_daily_RJ)) {
+    if(i!=j) {
+      Ccf(as.numeric(data_all_daily_RJ[1:Length_Time_Series][,i]),
+          as.numeric(data_all_daily_RJ[1:Length_Time_Series][,j]), main =paste("Correlation between",
+          paste("R",colnames(data_all_daily_RJ)[i]), "and", "R",colnames(data_all_daily_RJ)[j]))
+    }
+  }
+}
+
+par(mfrow = c(2, 5))
+i<-1; j<-1
+for (i in 1:ncol(data_all_daily_Italy)) {
+  for (j in i:ncol(data_all_daily_Italy)) {
+    if(i!=j) {
+      Ccf(as.numeric(data_all_daily_Italy[1:Length_Time_Series][,i]),
+          as.numeric(data_all_daily_Italy[1:Length_Time_Series][,j]), 
+          main =paste("Correlation between",colnames(data_all_daily_Italy)[i], 
+                      "and",colnames(data_all_daily_Italy)[j]))
+    }
+  }
+}
+
+par(mfrow = c(2, 3))
+i<-1; j<-1
+for (i in 1:ncol(data_all_daily_US)) {
+  for (j in i:ncol(data_all_daily_US)) {
+    if(i!=j) {
+      Ccf(as.numeric(data_all_daily_US[1:Length_Time_Series][,i]),
+          as.numeric(data_all_daily_US[1:Length_Time_Series][,j]), 
+          main =paste("Correlation between",colnames(data_all_daily_US)[i], 
+                      "and",colnames(data_all_daily_US)[j]))
+    }
+  }
+}
+rm(i,j)
+par(mfrow = c(1,1))
+
+
+
+############# Select data between: data_all_daily_RJ, data_all_daily_Italy or data_all_daily_US #######
+
+data_all <-data_all_daily_RJ[1:Length_Time_Series]
+data_all_training <-data_all_daily_RJ[Training_Length]
+data_all_test <-data_all_daily_RJ[Test_Length]
+
+############### Creating RMSE models data frames ###################
+
+{
+results_univariate_forecasting_ETS<-data.frame(method=rep(0,ncol(data_all_training)),
+                                               rmse_in_sample=rep(0,ncol(data_all_training)),
+                                               rmse_out_sample_4_weeks=rep(0,ncol(data_all_training)),
+                                               rmse_out_sample_weekly=rep(0,ncol(data_all_training)))
+rownames(results_univariate_forecasting_ETS)<-colnames(data_all_training)
+
+results_univariate_forecasting_ARIMA<-data.frame(method=rep(0,ncol(data_all_training)),
+                                                 rmse_in_sample=rep(0,ncol(data_all_training)),
+                                                 rmse_out_sample_4_weeks=rep(0,ncol(data_all_training)),
+                                                 rmse_out_sample_weekly=rep(0,ncol(data_all_training)))
+rownames(results_univariate_forecasting_ARIMA)<-colnames(data_all_training)
+
+results_univariate_forecasting_NNETAR<-data.frame(method=rep(0,ncol(data_all_training)),
+                                                  rmse_in_sample=rep(0,ncol(data_all_training)),
+                                                  rmse_out_sample_4_weeks=rep(0,ncol(data_all_training)),
+                                                  rmse_out_sample_weekly=rep(0,ncol(data_all_training)))
+rownames(results_univariate_forecasting_NNETAR)<-colnames(data_all_training)
+
+results_univariate_forecasting_TBATS<-data.frame(method=rep(0,ncol(data_all_training)),
+                                                 rmse_in_sample=rep(0,ncol(data_all_training)),
+                                                 rmse_out_sample_4_weeks=rep(0,ncol(data_all_training)),
+                                                 rmse_out_sample_weekly=rep(0,ncol(data_all_training)))
+rownames(results_univariate_forecasting_TBATS)<-colnames(data_all_training)
+
+results_univariate_forecasting_MLP<-data.frame(method=rep(0,ncol(data_all_training)),
+                                               rmse_in_sample=rep(0,ncol(data_all_training)),
+                                               rmse_out_sample_4_weeks=rep(0,ncol(data_all_training)),
+                                               rmse_out_sample_weekly=rep(0,ncol(data_all_training)))
+rownames(results_univariate_forecasting_MLP)<-colnames(data_all_training)
+results_univariate_forecasting_MLP
+
+results_univariate_forecasting_KF<-data.frame(method=rep(0,ncol(data_all_training)),
+                                              rmse_in_sample_pred=rep(0,ncol(data_all_training)),
+                                              rmse_out_sample_4_weeks=rep(0,ncol(data_all_training)),
+                                              rmse_out_sample_weekly=rep(0,ncol(data_all_training)))
+rownames(results_univariate_forecasting_KF)<-colnames(data_all_training)
+
+results_multivariate_forecasting_VAR<-data.frame(method=rep(0,ncol(data_all_training)),
+                                                 rmse_in_sample=rep(0,ncol(data_all_training)),
+                                                 rmse_out_sample_4_weeks=rep(0,ncol(data_all_training)),
+                                                 rmse_out_sample_weekly=rep(0,ncol(data_all_training)))
+rownames(results_multivariate_forecasting_VAR)<-colnames(data_all_training)
+
+results_multivariate_forecasting_KF<-data.frame(method=rep(0,ncol(data_all_training)),
+                                                rmse_in_sample=rep(0,ncol(data_all_training)),
+                                                rmse_out_sample_4_weeks=rep(0,ncol(data_all_training)),
+                                                rmse_out_sample_weekly=rep(0,ncol(data_all_training)))
+rownames(results_multivariate_forecasting_KF)<-colnames(data_all_training)
+}
+
+############### Running Models ###################
+set.seed(123456)
+#{
+#start_time<-Sys.time()
+############### Seting plots ###################
+par(mfrow = c(2, ceiling(ncol(data_all)/2)))
+
+############### ETS Models ###################
+par(mfrow = c(2, ceiling(ncol(data_all)/2)))
+i<-1
+for (i in 1:ncol(data_all_training)) {
+  ETS_Model<-ets(ts(data_all_training[,i],frequency = 7))
+  rmse_ets_week_out_of_sample<-rep(0,4)
+  rmse_ets_week_out_of_sample[1]<-round(MLmetrics::RMSE(forecast(ETS_Model,h=7)$mean,
+                                                        as.numeric(data_all_test[1:7,i])),1)
+  week_index<-1
+  for (week_index in 1:3) {
+    ETS_Model_week_n<-ets(ts(c(data_all_training[,i],data_all_test[1:7*week_index,i]),frequency = 7), 
+                          model = ETS_Model, use.initial.values = TRUE)
+    rmse_ets_week_out_of_sample[week_index+1]<-MLmetrics::RMSE(forecast(ETS_Model_week_n,h=7)$mean,
+    as.numeric(data_all_test[((7*week_index)+1):(7*(week_index+1)),i]))
+  }
+  results_univariate_forecasting_ETS[i,]<-c(paste(ETS_Model$method,"parameters=",length(ETS_Model[["par"]])),
+                                            round(MLmetrics::RMSE(ETS_Model$fitted, data_all_training[,i]),1),
+                                            round(MLmetrics::RMSE(forecast(ETS_Model,h=prediction_range)$mean,
+                                            as.numeric(data_all_test[,i])),1), 
+                                            round(mean(rmse_ets_week_out_of_sample),1))
+{plot(as.numeric(data_all_training[,i]), type = "l", xlim = c(1, Length_Time_Series),main=
+paste(colnames(data_all_training)[i],"Time-serie evaluation:",ETS_Model$method),xlab="Days", ylab = "Daily cases")
+lines(as.numeric(ETS_Model$fitted), col = "blue",lty = 2)
+lines((max(Training_Length)+1):Length_Time_Series,as.numeric(data_all_test[,i]), col = "green")
+lines((max(Training_Length)+1):Length_Time_Series,as.numeric(forecast(ETS_Model,h=prediction_range)$mean), 
+col = "blue",lty = 3)
+# legend(x = "topleft", lty = c(1,2,1,3),col= c("black","blue","green","blue"), 
+# legend=c("training data", "fitted values","test data","prediction"), text.width = 40, cex = 0.8)
+}
+rm(ETS_Model_week_n,rmse_ets_week_out_of_sample)
+}
+results_univariate_forecasting_ETS
+
+############### ARIMA Models ###################
+par(mfrow = c(2, ceiling(ncol(data_all)/2)))
+i<-1
+for (i in 1:ncol(data_all_training)) {
+  ARIMA_Model<-auto.arima(ts(data_all_training[,i],frequency = 7))
+  rmse_arima_week_out_of_sample<-rep(0,4)
+  rmse_arima_week_out_of_sample[1]<-round(MLmetrics::RMSE(forecast(ARIMA_Model,h=7)$mean,
+                                                          as.numeric(data_all_test[1:7,i])),1)
+  week_index<-1
+  for (week_index in 1:3) {
+    ARIMA_Model_week_n<-Arima(ts(c(data_all_training[,i],data_all_test[1:7*week_index,i]),frequency = 7),
+                              model = ARIMA_Model)
+    rmse_arima_week_out_of_sample[week_index+1]<-MLmetrics::RMSE(forecast(ARIMA_Model_week_n,h=7)$mean,
+                                      as.numeric(data_all_test[((7*week_index)+1):(7*(week_index+1)),i]))
+  }
+  results_univariate_forecasting_ARIMA[i,]<-c(paste0(ARIMA_Model, " parameters=",length(ARIMA_Model[["coef"]])),
+                                              round(MLmetrics::RMSE(ARIMA_Model$fitted, data_all_training[,i]),1),
+                                              round(MLmetrics::RMSE(forecast(ARIMA_Model,h=prediction_range)$mean,
+                                                                    as.numeric(data_all_test[,i])),1), 
+                                              round(mean(rmse_arima_week_out_of_sample),1))
+{plot(as.numeric(data_all_training[,i]), type = "l", xlim = c(1, Length_Time_Series),main=
+paste(colnames(data_all_training)[i],"Time-serie evaluation:",paste0(ARIMA_Model)),xlab="Days", ylab = "Daily cases")
+lines(as.numeric(ARIMA_Model$fitted), col = "blue",lty = 2)
+lines((max(Training_Length)+1):Length_Time_Series,as.numeric(data_all_test[,i]), col = "green")
+lines((max(Training_Length)+1):Length_Time_Series,as.numeric(forecast(ARIMA_Model,h=prediction_range)$mean), 
+col = "blue",lty = 3)}
+rm(ARIMA_Model_week_n,rmse_arima_week_out_of_sample)
+}
+results_univariate_forecasting_ARIMA
+
+############### NNETAR Models ###################
+par(mfrow = c(2, ceiling(ncol(data_all)/2)))
+i<-1
+for (i in 1:ncol(data_all_training)) {
+  NNETAR_Model<-nnetar(ts(data_all_training[,i],frequency = 7))
+  rmse_nnetar_week_out_of_sample<-rep(0,4)
+  rmse_nnetar_week_out_of_sample[1]<-round(MLmetrics::RMSE(forecast(NNETAR_Model,h=7)$mean,
+                                                           as.numeric(data_all_test[1:7,i])),1)
+  week_index<-1
+  for (week_index in 1:3) {
+  NNETAR_Model_week_n<- nnetar(ts(c(data_all_training[,i],data_all_test[1:7*week_index,i]),frequency = 7),
+                                 model = NNETAR_Model)
+
+    rmse_nnetar_week_out_of_sample[week_index+1]<-MLmetrics::RMSE(forecast(NNETAR_Model_week_n,h=7)$mean,
+                                as.numeric(data_all_test[((7*week_index)+1):(7*(week_index+1)),i]))
+  }
+  rmse_nnetar_week_out_of_sample
+  results_univariate_forecasting_NNETAR[i,]<-c(NNETAR_Model[["method"]],
+                                               round(accuracy(NNETAR_Model)[,"RMSE"],1),
+                                               round(MLmetrics::RMSE(forecast(NNETAR_Model,h=prediction_range)$mean,
+                                                                     as.numeric(data_all_test[,i])),1),
+                                               round(mean(rmse_nnetar_week_out_of_sample),1))
+{plot(as.numeric(data_all_training[,i]), type = "l", xlim = c(1, Length_Time_Series),main=
+paste(colnames(data_all_training)[i],"Time-serie evaluation:",NNETAR_Model[["method"]]),xlab="Days", 
+ylab = "Daily cases")
+lines(as.numeric(NNETAR_Model$fitted), col = "blue",lty = 2)
+lines((max(Training_Length)+1):Length_Time_Series,as.numeric(data_all_test[,i]), col = "green")
+lines((max(Training_Length)+1):Length_Time_Series,as.numeric(forecast(NNETAR_Model,h=prediction_range)$mean), 
+col = "blue",lty = 3)}
+rm(NNETAR_Model_week_n,rmse_nnetar_week_out_of_sample)
+}
+results_univariate_forecasting_NNETAR
+
+############### TBATS Models ###################
+par(mfrow = c(2, ceiling(ncol(data_all)/2)))
+i<-1
+for (i in 1:ncol(data_all_training)) {
+  TBATS_Model<-tbats(ts(data_all_training[,i],frequency = 7),seasonal.periods = 7)
+  rmse_tbats_week_out_of_sample<-rep(0,4)
+  rmse_tbats_week_out_of_sample[1]<-MLmetrics::RMSE(forecast(TBATS_Model,h=7)$mean,
+                                                          as.numeric(data_all_test[1:7,i]))
+  week_index<-1
+  for (week_index in 1:3) {
+    TBATS_Model_week_n<- tbats(ts(c(data_all_training[,i],data_all_test[1:7*week_index,i]),frequency = 7),
+                               model = TBATS_Model)
+    rmse_tbats_week_out_of_sample[week_index+1]<-MLmetrics::RMSE(forecast(TBATS_Model_week_n,h=7)$mean,
+    as.numeric(data_all_test[((7*week_index)+1):(7*(week_index+1)),i]))
+  }
+  results_univariate_forecasting_TBATS[i,]<-c(paste0(TBATS_Model, ", parameters=",
+                                                     length(TBATS_Model[["parameters"]][["vect"]])),
+                                              round(MLmetrics::RMSE(TBATS_Model$fitted, data_all_training[,i]),1),
+                                              round(MLmetrics::RMSE(forecast(TBATS_Model,h=prediction_range)$mean,
+                                                                    as.numeric(data_all_test[,i])),1),
+                                              round(mean(rmse_tbats_week_out_of_sample),1))
+{plot(as.numeric(data_all_training[,i]), type = "l", xlim = c(1, Length_Time_Series),main=
+paste(colnames(data_all_training)[i],"Time-serie evaluation:",paste0(TBATS_Model)),xlab="Days", ylab = "Daily cases")
+lines(as.numeric(TBATS_Model$fitted), col = "blue",lty = 2)
+lines((max(Training_Length)+1):Length_Time_Series,as.numeric(data_all_test[,i]), col = "green")
+lines((max(Training_Length)+1):Length_Time_Series,as.numeric(forecast(TBATS_Model,h=prediction_range)$mean), 
+col = "blue",lty = 3)}
+rm(TBATS_Model_week_n,rmse_tbats_week_out_of_sample)
+}
+results_univariate_forecasting_TBATS
+
+####### Multi-Layer Perceptron ######################
+par(mfrow = c(2, ceiling(ncol(data_all)/2)))
+i<-1
+for (i in 1:ncol(data_all_training)) {
+  MLP_Model <- nnfor::mlp(ts(data_all_training[,i]),lags = c(1:28),hd=NULL, 
+                          hd.auto.type = "elm",retrain = TRUE) 
+  frc <- forecast(MLP_Model,h=prediction_range)
+  rmse_mlp_week_out_of_sample<-rep(0,4)
+  rmse_mlp_week_out_of_sample[1]<-MLmetrics::RMSE(forecast(MLP_Model,h=7)$mean,
+                                                        as.numeric(data_all_test[1:7,i]))
+  week_index<-1
+  for (week_index in 1:3) {
+    MLP_Model_week_n<- nnfor::mlp(ts(c(data_all_training[,i],data_all_test[1:7*week_index,i]))
+    , model = MLP_Model,retrain = FALSE)
+    rmse_mlp_week_out_of_sample[week_index+1]<-MLmetrics::RMSE(forecast(MLP_Model_week_n,h=7)$mean,
+    as.numeric(data_all_test[((7*week_index)+1):(7*(week_index+1)),i]))
+  }
+results_univariate_forecasting_MLP[i,]<-c(paste("Hidden nodes:",paste(MLP_Model$hd, collapse = " "), 
+"Univariate lags:",paste(MLP_Model$lags, collapse = " "), "Difference order:",MLP_Model$difforder),
+round(MLmetrics::RMSE(as.numeric(data_all_training[start(MLP_Model$fitted)[1]:(max(Training_Length)),i]),
+as.numeric(MLP_Model$fitted)),1),round(MLmetrics::RMSE(frc[["mean"]],as.numeric(data_all_test[,i])),1), 
+round(mean(rmse_mlp_week_out_of_sample),1))
+{plot(as.numeric(data_all_training[,i]), type = "l", xlim = c(1, Length_Time_Series),main=
+paste(colnames(data_all_training)[i],"Time-serie evaluation MLP - HD",paste(MLP_Model$hd, collapse = " "), 
+"Diff order:", MLP_Model$difforder),xlab="Days", ylab = "Daily cases")
+lines(start(MLP_Model$fitted)[1]:max(Training_Length),as.numeric(MLP_Model$fitted), 
+      col = "blue",lty = 2)
+lines((max(Training_Length)+1):Length_Time_Series,as.numeric(data_all_test[,i]), col = "green")
+lines((max(Training_Length)+1):Length_Time_Series,as.numeric(forecast(MLP_Model,h=prediction_range)$mean), 
+col = "blue",lty = 3)}
+rm(MLP_Model_week_n,rmse_mlp_week_out_of_sample,frc)
+}
+results_univariate_forecasting_MLP
+
+####### Kalman Filter Univariate ######################
+par(mfrow = c(2, ceiling(ncol(data_all)/2)))
+i<-1
+for (i in 1:ncol(data_all_training)) {
+  y <- data_all_training[,i]
+  y_test <- data_all_test[,i]
+  # punto partida
+
+Aic_m<-rep(0,2)
+
+n<-1
+
+for (n in 1:2) {
+  nx = n+1 # nx = 2 no funciona para us 3
+  ny = ncol(y) # quantidade de series
+  ms = ACQRS_sub(y, nx, ny)
+  
+  Ai = ms$A
+  Ci = ms$C
+  Qi = ms$Q
+  Ri = ms$R
+  m1i = rep(0,nx)
+  P1i = matrix(0, nx,nx)
+  
+    #m = ACQR_em(y,Ai,Ci,Qi,Ri,m1i,P1i,nx,ny,max_iter = 100,txo=FALSE)
+  
+  if (nx == 2){
+    A0 = matrix(c(1,0,1,1), nrow = 2)
+    C0 = matrix(c(1,0), nrow = 1, ncol = nx)
+    Q0 = diag(nx)
+    R0 = 1
+    m10 = pinv(C0) %*% y[1]
+    P10 = matrix(0, nx,nx) 
+  }
+  if (nx == 3){
+    A0 = matrix(c(1,0,0,1,1,0,0,1,1), nrow = 3)
+    C0 = matrix(c(1,0,0), nrow = 1, ncol = nx)
+    Q0 = diag(nx)
+    R0 = 1
+    m10 = pinv(C0) %*% y[1]
+    P10 = matrix(0, nx,nx) 
+  }
+
+  if(nx == 1) {
+    m = ACQR_em(y,Ai,Ci,Qi,Ri,m1i,P1i,nx,ny,max_iter = 100,txo=FALSE)
+    } else {
+    m = ACQR_em(y,A0,C0,Q0,R0,m10,P10,nx,ny,max_iter = 100,txo=FALSE)
+    }
+  
+  Aic_m[n]<-  m[["aic"]]
+
+}
+
+nx<- (1+which.min(Aic_m))*ncol(y)
+
+ny = ncol(y) # quantidade de series
+ms = ACQRS_sub(y, nx, ny)
+
+Ai = ms$A
+Ci = ms$C
+Qi = ms$Q
+Ri = ms$R
+m1i = rep(0,nx)
+P1i = matrix(0, nx,nx)
+
+#m = ACQR_em(y,Ai,Ci,Qi,Ri,m1i,P1i,nx,ny,max_iter = 100,txo=FALSE)
+
+if (nx == 2){
+  A0 = matrix(c(1,0,1,1), nrow = 2)
+  C0 = matrix(c(1,0), nrow = 1, ncol = nx)
+  Q0 = diag(nx)
+  R0 = 1
+  m10 = pinv(C0) %*% y[1]
+  P10 = matrix(0, nx,nx) 
+}
+if (nx == 3){
+  A0 = matrix(c(1,0,0,1,1,0,0,1,1), nrow = 3)
+  C0 = matrix(c(1,0,0), nrow = 1, ncol = nx)
+  Q0 = diag(nx)
+  R0 = 1
+  m10 = pinv(C0) %*% y[1]
+  P10 = matrix(0, nx,nx) 
+}
+
+m = ACQR_em(y,A0,C0,Q0,R0,m10,P10,nx,ny,max_iter = 100,txo=FALSE)
+  
+# predic in sample
+
+mk1 = ACQR_kfilter(y,m$A,m$C,m$Q,m$R,m$m1,m$P1,nx,ny)
+pred1 = m$C %*% mk1$xtt1  
+  
+# pred out of sample
+
+pred2 = ACQR_predict(y, m$A,m$C,m$Q,m$R,m$m1,m$P1, nx, ny, n_ahead = prediction_range)
+  
+{plot(as.numeric(data_all_training[,i]), type = "l", xlim = c(1, Length_Time_Series),main=
+paste(colnames(data_all_training)[i],paste("Time-serie evaluation SSM-U nx:",nx)),xlab="Days", ylab = "Daily cases")
+lines(1:length(pred1[1,]),pred1[1,], col = "blue",lty = 2)
+lines((max(Training_Length)+1):Length_Time_Series,as.numeric(y_test), col = "green")
+lines((max(Training_Length)+1):Length_Time_Series,as.numeric(pred2$yp), 
+col = "blue",lty = 3)}
+
+rmse_kf_week_out_of_sample<-rep(0,4)
+rmse_kf_week_out_of_sample[1]<-round(MLmetrics::RMSE(
+  ACQR_predict(y, m$A,m$C,m$Q,m$R,m$m1,m$P1, nx, ny, n_ahead = 7)$yp,
+  as.numeric(y_test[1:7])),1)
+  
+week_index<-1
+for (week_index in 1:3) {
+    rmse_kf_week_out_of_sample[week_index+1]<-MLmetrics::RMSE(ACQR_predict(c(y,y_test[1:7*week_index]), 
+      m$A,m$C,m$Q,m$R,m$m1,m$P1, nx, ny, n_ahead = 7)$yp,as.numeric(y_test[((7*week_index)+1):(7*(week_index+1))]))
+}
+
+results_univariate_forecasting_KF[i,]<-c(paste0("nx=",nx),round(MLmetrics::RMSE(pred1[-1],as.numeric(y)),1),
+round(MLmetrics::RMSE(pred2$yp,as.numeric(y_test)),1), round(mean(rmse_kf_week_out_of_sample),1))
+rm(rmse_kf_week_out_of_sample)
+}
+results_univariate_forecasting_KF
+
+############### VAR Model ###################
+par(mfrow = c(2, ceiling(ncol(data_all)/2)))
+{
+y <- data_all_training
+y_test <- data_all_test
+colnames(y)<-c(1:ncol(y))
+colnames(y_test)<-c(1:ncol(y))
+
+types<-c("none", "const", "trend", "both")
+
+Aic_model<-rep(0,length(types))
+i<-1
+for (i in 1:length(types)) {
+  type<-types[i]
+  lagselect <- vars::VARselect(y, lag.max = 28, type = type)
+  p<-lagselect$selection[["SC(n)"]]
+  results_multivariate_forecasting_VAR$method<-paste("p =",p)
+  Model1 <- vars::VAR(y, p = p, type = type, season = 7, exog = NULL)
+  Aic_model[i]<-AIC(Model1)
+}
+
+type<-types[which.min(Aic_model)]
+lagselect <- vars::VARselect(y, lag.max = 28, type = type)
+p<-lagselect$selection[["SC(n)"]]
+results_multivariate_forecasting_VAR$method<-paste0("type=",type,",parameters=",ncol(Model1[["datamat"]]),", p=",p)
+Model1 <- vars::VAR(y, p = p, type = type, season = 7, exog = NULL)
+roots(Model1)
+summary(Model1)
+
+i<-1
+for (i in 1:ncol(y)) {
+  results_multivariate_forecasting_VAR$rmse_in_sample[i]<-
+    round(MLmetrics::RMSE(as.numeric(Model1[["varresult"]][[paste0("X",i)]][["fitted.values"]]),
+                          y[(p+1):nrow(y),4]),1)
+}
+
+Serial1 <- vars::serial.test(Model1, lags.pt = 5, type = "PT.asymptotic")
+Serial1
+
+Arch1 <- vars::arch.test(Model1, lags.multi = 15, multivariate.only = TRUE)
+Arch1
+
+Norm1 <- vars::normality.test(Model1, multivariate.only = TRUE)
+Norm1
+
+Stability1 <- stability(Model1, type = "OLS-CUSUM")
+
+#par(mar = rep(2, 4))
+
+#plot(Stability1)
+
+#plot(predict(Model1, n.ahead = prediction_range, ci = 0.95))
+
+i<-1
+for (i in 1:ncol(y)) {
+{plot(as.numeric(data_all_training[,i]), type = "l", xlim = c(1, Length_Time_Series),main=
+paste(colnames(data_all_training)[i],"Time-serie evaluation: VAR p:",p, "type:",type),xlab="Days",ylab = "Daily cases")
+lines(1:length(as.numeric(Model1[["varresult"]][[paste0("X",i)]][["fitted.values"]])),
+as.numeric(Model1[["varresult"]][[paste0("X",i)]][["fitted.values"]]), col = "blue",lty = 2)
+lines((max(Training_Length)+1):Length_Time_Series,
+as.numeric(predict(Model1, n.ahead = prediction_range, ci = 0.95)[["fcst"]][[paste0("X",i)]][,"fcst"]), 
+col = "green")
+lines((max(Training_Length)+1):Length_Time_Series,
+as.numeric(predict(Model1, n.ahead = prediction_range, ci = 0.95)[["fcst"]][[paste0("X",i)]][,"fcst"]), 
+col = "blue",lty = 3)}
+}
+
+i<-1
+for (i in 1:ncol(y)) {
+  results_multivariate_forecasting_VAR$rmse_out_sample_4_weeks[i]<-
+    round(MLmetrics::RMSE(predict(Model1, n.ahead = prediction_range, ci = 0.95)[["fcst"]][[paste0("X",i)]][,1],
+                          y_test[,4]),1)
+}
+
+rmse_Multi_VAR_week_out_of_sample<-matrix(0,nrow = ncol(y),ncol = 4)
+rownames(rmse_Multi_VAR_week_out_of_sample)<-rownames(results_multivariate_forecasting_VAR)
+colnames(rmse_Multi_VAR_week_out_of_sample)<-paste("week",c(1:ncol(results_multivariate_forecasting_VAR)))
+
+i<-1
+for (i in 1:ncol(y)) {
+  rmse_Multi_VAR_week_out_of_sample[i,1]<-round(MLmetrics::RMSE(predict(Model1, n.ahead = 7, 
+  ci = 0.95)[["fcst"]][[paste0("X",i)]][,1], y_test[,4]),1)
+}
+
+i<-1
+week_index<-1
+for (i in 1:ncol(y)) {
+  for (week_index in 1:3) {
+    y_n_week<-NULL
+    y_n_week<-c(y,y_test[1:7*week_index,])
+    Model_n_week<-NULL
+    Model_n_week <- VAR(y_n_week, p = p, type = type, season = 7, exog = NULL)
+    rmse_Multi_VAR_week_out_of_sample[i,week_index+1]<-MLmetrics::RMSE(
+      predict(Model_n_week, n_ahead = 7, ci = 0.95)[["fcst"]][[paste0("X",i)]][,1][1:7],
+      as.numeric(y_test[((7*week_index)+1):(7*(week_index+1)),i]))
+  }
+}
+results_multivariate_forecasting_VAR$rmse_out_sample_weekly<-round(rowMeans(rmse_Multi_VAR_week_out_of_sample),1)
+rm(Model_n_week,rmse_Multi_VAR_week_out_of_sample,Aic_model,types,type,p)
+}
+results_multivariate_forecasting_VAR
+
+####### Kalman Filter Multivariate ######################
+par(mfrow = c(2, ceiling(ncol(data_all)/2)))
+{
+y <- data_all_training
+y_test <- data_all_test
+Aic_m<-rep(0,2)
+  
+n<-1
+  
+for (n in 1:2) {
+
+nx = (n+1)*ncol(y)
+ny = ncol(y)
+ms = ACQRS_sub(y, nx, ny)
+  
+Ai = ms$A
+Ci = ms$C
+Qi = ms$Q
+Ri = ms$R
+m1i = rep(0,nx)
+P1i = matrix(0, nx,nx)
+  
+
+if(nx==2*ncol(y)){
+  A0 = matrix(0, nrow = nx, ncol = nx)
+  for (ii in 1:ny){
+  A0[(2*ii-1):(2*ii),(2*ii-1):(2*ii)] = matrix(c(1,0,1,1), nrow = 2)
+}
+    C0 = matrix(0, nrow = ny, ncol = nx)
+    for (ii in 1:ny){
+      C0[ii,(2*ii-1):(2*ii)] = c(1,0)
+  }
+}
+  
+if(nx==3*ncol(y)){
+  A0 = matrix(0, nrow = nx, ncol = nx)
+  for (ii in 1:ny){
+    A0[(3*ii-2):(3*ii),(3*ii-2):(3*ii)] = matrix(c(1,0,0,1,1,0,0,1,1), nrow = 3)
+  }
+    C0 = matrix(0, nrow = ny, ncol = nx)
+  for (ii in 1:ny){
+      C0[ii,(3*ii-2):(3*ii)] = c(1,0,0)
+  }
+}
+  
+Q0 = diag(nx)
+R0 = diag(ny)
+m10 = matrix(0, nrow = ny, ncol = 1)
+P10 = matrix(0, nx,nx) 
+m = ACQR_em(y,A0,C0,Q0,R0,m10,P10,nx,ny,max_iter = 100,txo=FALSE)
+  
+Aic_m[n]<-m[["aic"]]
+  
+rm(ms,Ai,Ci,Qi,Ri,m1i,P1i,A0,C0,Q0,R0,m10,P10,m)
+} 
+  
+nx<-(1+which.min(Aic_m))*ncol(y)
+ny = ncol(y) # quantidade de series
+ms = ACQRS_sub(y, nx, ny)
+  
+Ai = ms$A
+Ci = ms$C
+Qi = ms$Q
+Ri = ms$R
+m1i = rep(0,nx)
+P1i = matrix(0, nx,nx)
+
+if(nx==2*ncol(y)){
+  A0 = matrix(0, nrow = nx, ncol = nx)
+  for (ii in 1:ny){
+    A0[(2*ii-1):(2*ii),(2*ii-1):(2*ii)] = matrix(c(1,0,1,1), nrow = 2)
+  }
+  C0 = matrix(0, nrow = ny, ncol = nx)
+  for (ii in 1:ny){
+    C0[ii,(2*ii-1):(2*ii)] = c(1,0)
+  }
+}
+
+if(nx==3*ncol(y)){
+  A0 = matrix(0, nrow = nx, ncol = nx)
+  for (ii in 1:ny){
+    A0[(3*ii-2):(3*ii),(3*ii-2):(3*ii)] = matrix(c(1,0,0,1,1,0,0,1,1), nrow = 3)
+  }
+  C0 = matrix(0, nrow = ny, ncol = nx)
+  for (ii in 1:ny){
+    C0[ii,(3*ii-2):(3*ii)] = c(1,0,0)
+  }
+}
+
+Q0 = diag(nx)
+R0 = diag(ny)
+m10 = matrix(0, nrow = ny, ncol = 1)
+P10 = matrix(0, nx,nx) 
+m = ACQR_em(y,A0,C0,Q0,R0,m10,P10,nx,ny,max_iter = 100,txo=FALSE)
+
+# predic in sample
+mk1 = ACQR_kfilter(y,m$A,m$C,m$Q,m$R,m$m1,m$P1,nx,ny)
+pred1 = m$C %*% mk1$xtt1  
+
+# pred out of sample
+pred2 = ACQR_predict(y, m$A,m$C,m$Q,m$R,m$m1,m$P1, nx, ny, n_ahead = prediction_range)
+
+i<-1
+for (i in 1:ncol(y)) {
+{plot(as.numeric(y[,i]), type = "l", xlim = c(1, Length_Time_Series),main=
+paste(colnames(y)[i],"Time-serie evaluation: SSM-M nx:",nx),xlab="Days",ylab = "Daily cases")
+lines(1:length(pred1[i,]),pred1[i,], col = "blue",lty = 2)
+lines((max(Training_Length)+1):Length_Time_Series, as.numeric(y_test[,i]), col = "green")
+lines((max(Training_Length)+1):Length_Time_Series, as.numeric(pred2$yp[i,]), col = "blue",lty = 3)}
+}
+
+results_multivariate_forecasting_KF$method<-nx
+
+i<-1
+for (i in 1:ncol(y)) {
+  results_multivariate_forecasting_KF$rmse_in_sample[i]<-round(MLmetrics::RMSE(pred1[i,-1],as.numeric(y[,i])),1)
+  results_multivariate_forecasting_KF$rmse_out_sample_4_weeks[i]<-
+      round(MLmetrics::RMSE(pred2$yp,as.numeric(y_test[,i])),1)
+}
+rmse_Multi_kf_week_out_of_sample<-matrix(0,nrow = ncol(y),ncol = 4)
+rownames(rmse_Multi_kf_week_out_of_sample)<-colnames(y)
+colnames(rmse_Multi_kf_week_out_of_sample)<-paste("week",c(1:ncol(rmse_Multi_kf_week_out_of_sample)))
+i<-1
+for (i in 1:ncol(y)) {
+  rmse_Multi_kf_week_out_of_sample[i,1]<-round(MLmetrics::RMSE(
+  ACQR_predict(y, m$A,m$C,m$Q,m$R,m$m1,m$P1, nx, ny, n_ahead = 7)$yp[i,],
+  as.numeric(y_test[1:7,i])),1)
+}
+i<-1
+week_index<-1
+for (i in 1:ncol(y)) {
+  for (week_index in 1:3) {
+    rmse_Multi_kf_week_out_of_sample[i,week_index+1]<-MLmetrics::RMSE(
+      ACQR_predict(c(y,y_test[1:7*week_index]), 
+                  m$A,m$C,m$Q,m$R,m$m1,m$P1, nx, ny, n_ahead = 7)$yp[i,],
+      as.numeric(y_test[((7*week_index)+1):(7*(week_index+1)),i]))
+  }
+}
+results_multivariate_forecasting_KF$rmse_out_sample_weekly<-round(rowMeans(rmse_Multi_kf_week_out_of_sample),1)
+rm(week_index,i,ii,Aic_m,rmse_Multi_kf_week_out_of_sample)
+}
+results_multivariate_forecasting_KF
+
+#end_time<-Sys.time()
+
+#}
+
+#end_time-start_time
+
+
+####### Comparing all methods results ######################
+
+in_sample_results<-data.frame(ETS=as.numeric(results_univariate_forecasting_ETS[,2])
+                              ,ARIMA=as.numeric(results_univariate_forecasting_ARIMA[,2])
+                              ,NNETAR=as.numeric(results_univariate_forecasting_NNETAR[,2])
+                              ,TBATS=as.numeric(results_univariate_forecasting_TBATS[,2])
+                              ,MLP=as.numeric(results_univariate_forecasting_MLP[,2])
+                              ,KF=as.numeric(results_univariate_forecasting_KF[,2])
+                              ,VAR=as.numeric(results_multivariate_forecasting_VAR[,2])
+                              ,MKF=as.numeric(results_multivariate_forecasting_KF[,2])
+)
+rownames(in_sample_results)<-colnames(data_all_training)
+
+out_sample_4_weeks_results<-data.frame(ETS=as.numeric(results_univariate_forecasting_ETS[,3])
+                                       ,ARIMA=as.numeric(results_univariate_forecasting_ARIMA[,3])
+                                       ,NNETAR=as.numeric(results_univariate_forecasting_NNETAR[,3])
+                                       ,TBATS=as.numeric(results_univariate_forecasting_TBATS[,3])
+                                       ,MLP=as.numeric(results_univariate_forecasting_MLP[,3])
+                                       ,KF=as.numeric(results_univariate_forecasting_KF[,3])
+                                       ,VAR=as.numeric(results_multivariate_forecasting_VAR[,3])
+                                       ,MKF=as.numeric(results_multivariate_forecasting_KF[,3])
+)
+rownames(out_sample_4_weeks_results)<-colnames(data_all_training)
+
+out_sample_weekly_results<-data.frame(ETS=as.numeric(results_univariate_forecasting_ETS[,4])
+                                      ,ARIMA=as.numeric(results_univariate_forecasting_ARIMA[,4])
+                                      ,NNETAR=as.numeric(results_univariate_forecasting_NNETAR[,4])
+                                      ,TBATS=as.numeric(results_univariate_forecasting_TBATS[,4])
+                                      ,MLP=as.numeric(results_univariate_forecasting_MLP[,4])
+                                      ,KF=as.numeric(results_univariate_forecasting_KF[,4])
+                                      ,VAR=as.numeric(results_multivariate_forecasting_VAR[,4])
+                                      ,MKF=as.numeric(results_multivariate_forecasting_KF[,4])
+)
+rownames(out_sample_weekly_results)<-colnames(data_all_training)
+
+better_in_sample_model<-data.frame(regions=colnames(data_all_training),model=NA)
+better_out_sample_4_weeks<-data.frame(regions=colnames(data_all_training),model=NA)
+better_out_sample_weekly_model<-data.frame(regions=colnames(data_all_training),model=NA)
+
+i<-1
+for (i in 1:ncol(data_all_training)) {
+  better_in_sample_model[i,2]<-colnames(in_sample_results)[which(
+    in_sample_results==matrixStats::rowMins(as.matrix(in_sample_results))[i],arr.ind = T)[2]]
+  better_out_sample_4_weeks[i,2]<-colnames(out_sample_4_weeks_results)[which(
+    out_sample_4_weeks_results==matrixStats::rowMins(as.matrix(out_sample_4_weeks_results))[i],arr.ind = T)[2]]
+  better_out_sample_weekly_model[i,2]<-colnames(out_sample_weekly_results)[which(
+    out_sample_weekly_results==matrixStats::rowMins(as.matrix(out_sample_weekly_results))[i],arr.ind = T)[2]]
+}
+
+better_in_sample_model
+better_out_sample_4_weeks
+better_out_sample_weekly_model
+
+data.frame(regions = better_in_sample_model$regions,in_sample = better_in_sample_model$model,
+out_sample_4_weeks = better_out_sample_4_weeks$model, out_sample_weekly = better_out_sample_weekly_model$model)
+
+
+######### Forecasting ##############
+
+
+par(mfrow = c(2, ceiling(ncol(data_all)/2)))
+i<-2
+ARIMA_Model<-auto.arima(ts(data_all[,i],frequency = 7))
+{plot(as.numeric(data_all[,i]), type = "l", xlim = c(1, Length_Time_Series+prediction_range),main=
+paste(colnames(data_all)[i],paste0(ARIMA_Model)),xlab="Days", ylab = "Daily cases")
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),
+as.numeric(forecast(ARIMA_Model, h = prediction_range, level = 0.95)[["mean"]]), col = "blue")
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),
+as.numeric(forecast(ARIMA_Model, h = prediction_range, level = 0.95)[["upper"]]), col = "blue",lty=2)
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),
+as.numeric(forecast(ARIMA_Model, h = prediction_range, level = 0.95)[["lower"]]), col = "blue",lty=2)}
+
+
+
+i<-5
+TBATS_Model<-tbats(ts(data_all[,i],frequency = 7),seasonal.periods = 7)
+{plot(as.numeric(data_all[,i]), type = "l", xlim = c(1, Length_Time_Series+prediction_range),main=
+paste(colnames(data_all)[i],paste0(TBATS_Model)),xlab="Days", ylab = "Daily cases")
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),
+as.numeric(forecast(TBATS_Model, h = prediction_range, level = 0.95)[["mean"]]), col = "blue")
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),
+as.numeric(forecast(TBATS_Model, h = prediction_range, level = 0.95)[["upper"]]), col = "blue",lty=2)
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),
+as.numeric(forecast(TBATS_Model, h = prediction_range, level = 0.95)[["lower"]]), col = "blue",lty=2)}
+
+i<-3
+y <- data_all
+Aic_m<-rep(0,2)
+n<-1
+for (n in 1:2) {
+    
+    nx = (n+1)*ncol(y)
+    ny = ncol(y)
+    ms = ACQRS_sub(y, nx, ny)
+    
+    Ai = ms$A
+    Ci = ms$C
+    Qi = ms$Q
+    Ri = ms$R
+    m1i = rep(0,nx)
+    P1i = matrix(0, nx,nx)
+    
+    
+    if(nx==2*ncol(y)){
+      A0 = matrix(0, nrow = nx, ncol = nx)
+      for (ii in 1:ny){
+        A0[(2*ii-1):(2*ii),(2*ii-1):(2*ii)] = matrix(c(1,0,1,1), nrow = 2)
+      }
+      C0 = matrix(0, nrow = ny, ncol = nx)
+      for (ii in 1:ny){
+        C0[ii,(2*ii-1):(2*ii)] = c(1,0)
+      }
+    }
+    
+    if(nx==3*ncol(y)){
+      A0 = matrix(0, nrow = nx, ncol = nx)
+      for (ii in 1:ny){
+        A0[(3*ii-2):(3*ii),(3*ii-2):(3*ii)] = matrix(c(1,0,0,1,1,0,0,1,1), nrow = 3)
+      }
+      C0 = matrix(0, nrow = ny, ncol = nx)
+      for (ii in 1:ny){
+        C0[ii,(3*ii-2):(3*ii)] = c(1,0,0)
+      }
+    }
+    
+    Q0 = diag(nx)
+    R0 = diag(ny)
+    m10 = matrix(0, nrow = ny, ncol = 1)
+    P10 = matrix(0, nx,nx) 
+    m = ACQR_em(y,A0,C0,Q0,R0,m10,P10,nx,ny,max_iter = 100,txo=FALSE)
+    
+    Aic_m[n]<-m[["aic"]]
+    
+    rm(ms,Ai,Ci,Qi,Ri,m1i,P1i,A0,C0,Q0,R0,m10,P10,m)
+  } 
+nx<-(1+which.min(Aic_m))*ncol(y)
+ny = ncol(y)
+ms = ACQRS_sub(y, nx, ny)
+  
+Ai = ms$A
+Ci = ms$C
+Qi = ms$Q
+Ri = ms$R
+m1i = rep(0,nx)
+P1i = matrix(0, nx,nx)
+
+if(nx==2*ncol(y)){
+  A0 = matrix(0, nrow = nx, ncol = nx)
+  for (ii in 1:ny){
+    A0[(2*ii-1):(2*ii),(2*ii-1):(2*ii)] = matrix(c(1,0,1,1), nrow = 2)
+  }
+  C0 = matrix(0, nrow = ny, ncol = nx)
+  for (ii in 1:ny){
+    C0[ii,(2*ii-1):(2*ii)] = c(1,0)
+  }
+}
+  
+if(nx==3*ncol(y)){
+  A0 = matrix(0, nrow = nx, ncol = nx)
+  for (ii in 1:ny){
+    A0[(3*ii-2):(3*ii),(3*ii-2):(3*ii)] = matrix(c(1,0,0,1,1,0,0,1,1), nrow = 3)
+  }
+  C0 = matrix(0, nrow = ny, ncol = nx)
+  for (ii in 1:ny){
+    C0[ii,(3*ii-2):(3*ii)] = c(1,0,0)
+  }
+}
+  
+Q0 = diag(nx)
+R0 = diag(ny)
+m10 = matrix(0, nrow = ny, ncol = 1)
+P10 = matrix(0, nx,nx) 
+m = ACQR_em(y,A0,C0,Q0,R0,m10,P10,nx,ny,max_iter = 100,txo=FALSE)
+  
+# predic in sample
+mk1 = ACQR_kfilter(y,m$A,m$C,m$Q,m$R,m$m1,m$P1,nx,ny)
+pred1 = m$C %*% mk1$xtt1  
+  
+# pred out of sample
+pred2 = ACQR_predict(y, m$A,m$C,m$Q,m$R,m$m1,m$P1, nx, ny, n_ahead = prediction_range)
+
+{plot(as.numeric(data_all[,i]), type = "l", xlim = c(1, Length_Time_Series+prediction_range),main=
+paste(colnames(data_all)[i],"SSM-M nx:",nx),xlab="Days", ylab = "Daily cases")
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),as.numeric(pred2$yp[i,]), col = "blue")
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),as.numeric(pred2$ypi1[i,]), col = "blue",lty=2)
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),as.numeric(pred2$ypi2[i,]), col = "blue",lty=2)}
+
+i<-5
+MLP_Model <- nnfor::mlp(ts(data_all[,i]),lags = c(1:28),hd=NULL, hd.auto.type = "elm",retrain = TRUE) 
+frc <- forecast(MLP_Model,h=prediction_range, level=0.95)
+{plot(as.numeric(data_all[,i]), type = "l", xlim = c(1, Length_Time_Series+prediction_range),main=
+paste(colnames(data_all)[i],"MLP - HD",paste(MLP_Model$hd, collapse = " "), 
+"Diff order:", MLP_Model$difforder),xlab="Days", ylab = "Daily cases")
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),as.numeric(frc$mean), col = "blue")}
+
+i<-4
+y <- data_all_training[,i]
+Aic_m<-rep(0,2)
+n<-1
+for (n in 1:2) {
+    nx = n+1 # nx = 2 no funciona para us 3
+    ny = ncol(y) # quantidade de series
+    ms = ACQRS_sub(y, nx, ny)
+    
+    Ai = ms$A
+    Ci = ms$C
+    Qi = ms$Q
+    Ri = ms$R
+    m1i = rep(0,nx)
+    P1i = matrix(0, nx,nx)
+    
+    #m = ACQR_em(y,Ai,Ci,Qi,Ri,m1i,P1i,nx,ny,max_iter = 100,txo=FALSE)
+    
+    if (nx == 2){
+      A0 = matrix(c(1,0,1,1), nrow = 2)
+      C0 = matrix(c(1,0), nrow = 1, ncol = nx)
+      Q0 = diag(nx)
+      R0 = 1
+      m10 = pinv(C0) %*% y[1]
+      P10 = matrix(0, nx,nx) 
+    }
+    if (nx == 3){
+      A0 = matrix(c(1,0,0,1,1,0,0,1,1), nrow = 3)
+      C0 = matrix(c(1,0,0), nrow = 1, ncol = nx)
+      Q0 = diag(nx)
+      R0 = 1
+      m10 = pinv(C0) %*% y[1]
+      P10 = matrix(0, nx,nx) 
+    }
+    
+    if(nx == 1) {
+      m = ACQR_em(y,Ai,Ci,Qi,Ri,m1i,P1i,nx,ny,max_iter = 100,txo=FALSE)
+    } else {
+      m = ACQR_em(y,A0,C0,Q0,R0,m10,P10,nx,ny,max_iter = 100,txo=FALSE)
+    }
+    
+    Aic_m[n]<-  m[["aic"]]
+    
+  }
+  
+nx<- (1+which.min(Aic_m))*ncol(y)
+  
+ny = ncol(y)
+ms = ACQRS_sub(y, nx, ny)
+  
+Ai = ms$A
+Ci = ms$C
+Qi = ms$Q
+Ri = ms$R
+m1i = rep(0,nx)
+P1i = matrix(0, nx,nx)
+  
+if (nx == 2){
+    A0 = matrix(c(1,0,1,1), nrow = 2)
+    C0 = matrix(c(1,0), nrow = 1, ncol = nx)
+    Q0 = diag(nx)
+    R0 = 1
+    m10 = pinv(C0) %*% y[1]
+    P10 = matrix(0, nx,nx) 
+}
+if (nx == 3){
+    A0 = matrix(c(1,0,0,1,1,0,0,1,1), nrow = 3)
+    C0 = matrix(c(1,0,0), nrow = 1, ncol = nx)
+    Q0 = diag(nx)
+    R0 = 1
+    m10 = pinv(C0) %*% y[1]
+    P10 = matrix(0, nx,nx) 
+}
+  
+m = ACQR_em(y,A0,C0,Q0,R0,m10,P10,nx,ny,max_iter = 100,txo=FALSE)
+  
+# predic in sample
+  
+mk1 = ACQR_kfilter(y,m$A,m$C,m$Q,m$R,m$m1,m$P1,nx,ny)
+pred1 = m$C %*% mk1$xtt1  
+  
+# pred out of sample
+  
+pred2 = ACQR_predict(y, m$A,m$C,m$Q,m$R,m$m1,m$P1, nx, ny, n_ahead = prediction_range)
+{plot(as.numeric(data_all[,i]), type = "l", xlim = c(1, Length_Time_Series+prediction_range),main=
+paste(colnames(data_all)[i],"SSM-U nx:",nx),xlab="Days", ylab = "Daily cases")
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),as.numeric(pred2$yp), col = "blue")
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),as.numeric(pred2$ypi1), col = "blue",lty=2)
+lines((Length_Time_Series+1):(Length_Time_Series+prediction_range),as.numeric(pred2$ypi2), col = "blue",lty=2)}
+
