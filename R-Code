@@ -29,7 +29,7 @@ getOption('timeout')
 options(timeout=100)
 getOption('timeout')
 
-link_casos_mortes<-"https://pcrj.maps.arcgis.com/sharing/rest/content/items/b54234c151aa4d01b488dc12aafd5574/data"
+link_casos_mortes<-"https://pcrj.maps.arcgis.com/sharing/rest/content/items/ae85fc84a9b244108d96c7072be4d3d3/data"
 
 Dados_indiv_MRJ_covid19 <- read.delim(link_casos_mortes, header = T, skip = 0, sep = ",",
                                       na.strings = c("Missing","","#N/D", "NA", "N/D"))
